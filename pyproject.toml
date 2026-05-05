@@ -68,8 +68,13 @@ policy-client = { workspace = true }
 lerobot = { git = "https://github.com/huggingface/lerobot", rev = "0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" }
 dlimp = { git = "https://github.com/kvablack/dlimp", rev = "ad72ce3a9b414db2185bc0b38461d4101a65477a" }
 
+# `packages/openpi-client` is intentionally excluded from the uv workspace so that
+# adding it does not invalidate the existing `uv.lock`. It is shipped only as a
+# source tree on PYTHONPATH (see server/Dockerfile), and only its dependencies
+# (`msgpack`, `tree`, `websockets`) need to be available — those already are via
+# this project's main dependency set.
 [tool.uv.workspace]
-members = ["packages/*"]
+members = ["packages/policy-client"]
 
 [tool.ruff]
 line-length = 120

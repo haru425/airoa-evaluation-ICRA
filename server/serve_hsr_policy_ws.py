@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""Minimal websocket policy server for the AIRoA HSR evaluation harness.
+"""WebSocket policy server for the AIRoA HSR evaluation harness.
 
-This is the **starting template** distributed on the `base` branch. It
-serves a `ZeroPolicy` placeholder that returns valid-shaped zero actions so
-the harness round-trip (client → server → client) can be smoke-tested out
-of the box, before you have integrated your model.
-
-Replace `ZeroPolicy` (or swap it via `--policy-module`) with your own policy
-that exposes a single method:
+Loads `MyPolicyAdapter` (`src/my_policy/adapter.py`), which wraps an openpi
+JAX `pi05_hsr` checkpoint trained with `openpi_offline_rl`. The adapter
+exposes the single method the harness calls:
 
     policy.infer(obs: dict) -> dict
 
-See `docs/INTEGRATION_GUIDE.md` for the full integration walkthrough and
-`docs/FAQ.md` §3 for the WebSocket I/O contract this server implements.
+See `docs/INTEGRATION_GUIDE_ja.md` for the integration contract and
+`README.md` §5 for the WebSocket I/O dictionary shapes.
 
-For an OpenPI-loader example, fork from the `sample-openpi` branch instead.
+`POLICY_MODULE` (env var) can still override which adapter is loaded — this
+is handy for swapping in a `ZeroPolicy` to confirm the harness round-trip
+without spinning up the full model.
 """
 
 import argparse
@@ -31,8 +29,9 @@ from runtime_core.websocket_policy_server import WebsocketPolicyServer
 class ZeroPolicy:
     """Placeholder policy that returns zero actions of the correct shape.
 
-    Useful only for verifying the harness round-trip. Replace with your own
-    policy class for real evaluation.
+    Useful only for verifying the harness round-trip. Set
+    `POLICY_MODULE=server.serve_hsr_policy_ws:ZeroPolicy` (or just
+    `--policy-module` on the CLI) if you want to bypass the real model.
     """
 
     def __init__(self, checkpoint_dir: str | None = None) -> None:
@@ -45,19 +44,25 @@ class ZeroPolicy:
         return {"policy": "zero", "actions_shape": [1, 11]}
 
     def infer(self, obs: dict) -> dict:
-        # Contract reminder (see docs/FAQ.md §3):
-        #   obs["head_rgb"]: (480, 640, 3) uint8
-        #   obs["hand_rgb"]: (480, 640, 3) uint8
-        #   obs["state"]:    (8,)          float32
-        #   obs["prompt"]:   str
-        # Return: {"actions": np.ndarray of shape (T, 11), dtype=float32}
         return {"actions": np.zeros((1, 11), dtype=np.float32)}
 
 
-def _load_policy(policy_module: str | None, checkpoint_dir: str | None):
-    """Load `policy_module:Class` if provided, else fall back to ZeroPolicy."""
+def _load_policy(policy_module: str | None, checkpoint_dir: str | None, pytorch_device: str | None):
+    """Resolve and instantiate the policy class.
+
+    - If `policy_module` is provided as `module:Class`, dynamically import it.
+      The class is called with `checkpoint_dir=...` and (when accepted)
+      `device=...` so we don't have to hard-code the constructor signature.
+    - Otherwise default to `my_policy.adapter:MyPolicyAdapter`.
+    """
     if not policy_module:
-        return ZeroPolicy(checkpoint_dir=checkpoint_dir)
+        # Default path for this submission: the openpi-backed adapter.
+        from my_policy.adapter import MyPolicyAdapter
+
+        return MyPolicyAdapter(
+            checkpoint_path=checkpoint_dir,
+            device=pytorch_device,
+        )
 
     if ":" not in policy_module:
         raise ValueError(
@@ -66,23 +71,41 @@ def _load_policy(policy_module: str | None, checkpoint_dir: str | None):
     module_name, class_name = policy_module.split(":", 1)
     mod = importlib.import_module(module_name)
     cls = getattr(mod, class_name)
-    return cls(checkpoint_dir=checkpoint_dir)
+
+    # Best-effort kwargs — pass `device` only if the class accepts it.
+    kwargs: dict = {"checkpoint_dir": checkpoint_dir}
+    try:
+        import inspect
+
+        params = inspect.signature(cls).parameters
+        if "device" in params and pytorch_device is not None:
+            kwargs["device"] = pytorch_device
+        elif "pytorch_device" in params and pytorch_device is not None:
+            kwargs["pytorch_device"] = pytorch_device
+    except (TypeError, ValueError):
+        pass
+    return cls(**kwargs)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AIRoA HSR evaluation websocket policy server")
     parser.add_argument(
         "--checkpoint-dir",
-        default=None,
-        help="Path to checkpoint directory (passed to your policy class).",
+        default=os.environ.get("POLICY_CHECKPOINT_DIR"),
+        help="Path to checkpoint directory (passed to the policy class).",
     )
     parser.add_argument(
         "--policy-module",
         default=os.environ.get("POLICY_MODULE"),
         help=(
-            "Import path of your policy class in 'module:Class' form, e.g. "
-            "'my_policy.adapter:MyPolicyAdapter'. Defaults to the placeholder ZeroPolicy."
+            "Optional override of the policy class in 'module:Class' form. "
+            "If unset, defaults to 'my_policy.adapter:MyPolicyAdapter'."
         ),
+    )
+    parser.add_argument(
+        "--pytorch-device",
+        default=os.environ.get("POLICY_PYTORCH_DEVICE"),
+        help='Optional torch device override (e.g. "cuda", "cuda:0", "cpu").',
     )
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=8000, help="Bind port")
@@ -99,12 +122,13 @@ def main() -> None:
     else:
         checkpoint_dir = None
 
-    policy = _load_policy(args.policy_module, checkpoint_dir)
-    metadata = dict(getattr(policy, "metadata", {}))
+    policy = _load_policy(args.policy_module, checkpoint_dir, args.pytorch_device)
+
+    metadata = dict(getattr(policy, "metadata", {}) or {})
     metadata.update(
         {
             "checkpoint_dir": checkpoint_dir,
-            "policy_module": args.policy_module or "ZeroPolicy",
+            "policy_module": args.policy_module or "my_policy.adapter:MyPolicyAdapter",
             "server_host": args.host,
             "server_port": args.port,
         }
@@ -112,7 +136,7 @@ def main() -> None:
 
     logging.info(
         "Serving policy=%s checkpoint=%s on %s:%s",
-        args.policy_module or "ZeroPolicy",
+        args.policy_module or "my_policy.adapter:MyPolicyAdapter",
         checkpoint_dir,
         args.host,
         args.port,

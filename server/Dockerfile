@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml uv.lock LICENSE README.md ./
 COPY packages/policy-client ./packages/policy-client
+COPY packages/openpi-client ./packages/openpi-client
 COPY src ./src
 COPY server ./server
 COPY runtime_core ./runtime_core
@@ -31,7 +32,19 @@ RUN /workspace/.venv/bin/pip install --force-reinstall --no-deps \
         torch torchvision \
         --index-url https://download.pytorch.org/whl/cu128
 
+# Patch HuggingFace `transformers` so that PyTorch PaliGemma/Gemma/SigLIP modules
+# match the openpi training-time behavior. JAX/Orbax inference does not strictly
+# need this patch, but mirroring the upstream openpi setup is harmless and lets
+# `openpi.models_pytorch.*` imports succeed without surprises.
+RUN /workspace/.venv/bin/python -c "import transformers; print(transformers.__file__)" \
+        | xargs dirname \
+        | xargs -I{} cp -r /workspace/src/openpi/models_pytorch/transformers_replace/. {}/
+
 ENV PATH="/workspace/.venv/bin:${PATH}"
-ENV PYTHONPATH="/workspace:/workspace/src:/workspace/packages/policy-client/src"
+ENV PYTHONPATH="/workspace:/workspace/src:/workspace/packages/policy-client/src:/workspace/packages/openpi-client/src"
+# Where openpi expects to cache model assets downloaded from gs:// (e.g. base
+# checkpoints referenced by weight loaders). The mounted /policy_assets volume
+# is writable inside the container.
+ENV OPENPI_DATA_HOME="/policy_assets"
 
 ENTRYPOINT ["/workspace/server/entrypoint.sh"]

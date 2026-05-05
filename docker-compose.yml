@@ -11,7 +11,14 @@ services:
       POLICY_SERVER_PORT: ${POLICY_SERVER_PORT:-8000}
       POLICY_CHECKPOINT_DIR: /policy_checkpoint
       POLICY_DATA_HOME: /policy_assets
+      OPENPI_DATA_HOME: /policy_assets
       HF_HOME: /policy_hf_cache
+      # Optional pass-through env vars for the policy adapter:
+      POLICY_MODULE: ${POLICY_MODULE:-}
+      POLICY_PYTORCH_DEVICE: ${POLICY_PYTORCH_DEVICE:-}
+      POLICY_CONFIG_NAME: ${POLICY_CONFIG_NAME:-}
+      POLICY_DEFAULT_PROMPT: ${POLICY_DEFAULT_PROMPT:-}
+      POLICY_DISCRETE_STATE_INPUT: ${POLICY_DISCRETE_STATE_INPUT:-}
     volumes:
       - ${POLICY_CHECKPOINT_PATH:-./.docker_cache/policy_checkpoint}:/policy_checkpoint:ro
       - ${POLICY_CACHE_DIR:-./.docker_cache/policy_cache}:/policy_assets

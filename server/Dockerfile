@@ -28,7 +28,7 @@ RUN uv pip install --python /workspace/.venv/bin/python pytest
 # from the official PyTorch index. Required for Blackwell (RTX 5070 Ti);
 # without it, any CUDA op raises "no kernel image is available for execution
 # on the device". --no-deps keeps the rest of uv sync's resolution intact.
-RUN /workspace/.venv/bin/pip install --force-reinstall --no-deps \
+RUN uv pip install --python /workspace/.venv/bin/python \
         torch torchvision \
         --index-url https://download.pytorch.org/whl/cu128
 

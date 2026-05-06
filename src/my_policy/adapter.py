@@ -6,7 +6,9 @@ What this file does
 -------------------
 1. Loads the trained JAX/Orbax checkpoint via openpi's
    `policy_config.create_trained_policy`, which wires up the full HSR transform
-   stack (image resize → tokenizer → prompt injection → state/action norm).
+   stack (image resize -> tokenizer -> prompt injection -> state/action norm).
+   IQL checkpoints are loaded in policy-only mode so critic/discriminator
+   branches are not materialized for deployment.
 2. Renames AIRoA's observation keys (`head_rgb`, `hand_rgb`, `state`, `prompt`)
    into openpi's expected keys (`observation/image`,
    `observation/wrist_image`, `observation/state`, `prompt`) before delegating
@@ -76,6 +78,7 @@ class MyPolicyAdapter:
         device: str | None = None,
         default_prompt: str | None = None,
         discrete_state_input: bool | None = None,
+        load_policy_only: bool | None = None,
     ) -> None:
         # Accept either positional `checkpoint_path` or keyword `checkpoint_dir`,
         # because the base-branch server template passes `checkpoint_dir=...`.
@@ -111,6 +114,11 @@ class MyPolicyAdapter:
             discrete_state_input if discrete_state_input is not None else env_dsi,
             default=True,
         )
+        env_policy_only = os.environ.get("POLICY_LOAD_POLICY_ONLY")
+        policy_only = _resolve_bool(
+            load_policy_only if load_policy_only is not None else env_policy_only,
+            default=True,
+        )
 
         prompt = default_prompt
         if prompt is None:
@@ -123,10 +131,11 @@ class MyPolicyAdapter:
 
         logger.info(
             "Loading openpi policy: config_name=%s checkpoint=%s "
-            "discrete_state_input=%s default_prompt=%r",
+            "discrete_state_input=%s load_policy_only=%s default_prompt=%r",
             cfg_name,
             ckpt_path,
             dsi,
+            policy_only,
             prompt,
         )
 
@@ -139,11 +148,13 @@ class MyPolicyAdapter:
             ckpt_path,
             default_prompt=prompt,
             pytorch_device=self._pytorch_device,
+            load_policy_only=policy_only,
         )
 
         self._config_name = cfg_name
         self._checkpoint_dir = str(ckpt_path)
         self._discrete_state_input = dsi
+        self._load_policy_only = policy_only
         self._default_prompt = prompt
 
     # ------------------------------------------------------------------
@@ -159,6 +170,7 @@ class MyPolicyAdapter:
                 "config_name": self._config_name,
                 "checkpoint_dir": self._checkpoint_dir,
                 "discrete_state_input": self._discrete_state_input,
+                "load_policy_only": self._load_policy_only,
                 "default_prompt": self._default_prompt,
                 "action_dim": self.ACTION_DIM,
             }

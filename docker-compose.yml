@@ -19,6 +19,7 @@ services:
       POLICY_CONFIG_NAME: ${POLICY_CONFIG_NAME:-}
       POLICY_DEFAULT_PROMPT: ${POLICY_DEFAULT_PROMPT:-}
       POLICY_DISCRETE_STATE_INPUT: ${POLICY_DISCRETE_STATE_INPUT:-}
+      POLICY_LOAD_POLICY_ONLY: ${POLICY_LOAD_POLICY_ONLY:-}
     volumes:
       - ${POLICY_CHECKPOINT_PATH:-./.docker_cache/policy_checkpoint}:/policy_checkpoint:ro
       - ${POLICY_CACHE_DIR:-./.docker_cache/policy_cache}:/policy_assets

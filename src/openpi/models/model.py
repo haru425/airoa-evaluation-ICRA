@@ -1,4 +1,5 @@
 import abc
+from collections.abc import Callable
 from collections.abc import Sequence
 import dataclasses
 import enum
@@ -418,6 +419,7 @@ def restore_params(
     restore_type: type[np.ndarray] | type[jax.Array] = jax.Array,
     dtype: jnp.dtype | None = None,
     sharding: jax.sharding.Sharding | None = None,
+    key_filter: Callable[[tuple[str, ...]], bool] | None = None,
 ) -> at.Params:
     """Restores unstructured params PyTree from a checkpoint.
 
@@ -429,6 +431,9 @@ def restore_params(
         restore_type: The type to restore the params as. Can be set to `np.ndarray` to load the params as a numpy array.
         dtype: The dtype to restore all params as. If not provided, will use the original dtype from the checkpoint.
         sharding: The sharding to use for the params. If not provided, the params will be replicated across all devices.
+        key_filter: Optional predicate that receives normalized parameter key paths and returns True for keys to
+            restore. If the checkpoint was saved from an NNX state, the trailing "value" path component is removed
+            before the predicate is called.
 
     Returns:
         The restored params.
@@ -442,7 +447,18 @@ def restore_params(
 
     with ocp.PyTreeCheckpointer() as ckptr:
         metadata = ckptr.metadata(params_path)
-        item = {"params": metadata["params"]}
+        params_metadata = metadata["params"]
+        if key_filter is not None:
+            flat_metadata = traverse_util.flatten_dict(params_metadata)
+            filtered_metadata = {
+                key_path: value
+                for key_path, value in flat_metadata.items()
+                if key_filter(key_path[:-1] if key_path and key_path[-1] == "value" else key_path)
+            }
+            if not filtered_metadata:
+                raise ValueError(f"No checkpoint params matched key_filter for {params_path}.")
+            params_metadata = traverse_util.unflatten_dict(filtered_metadata)
+        item = {"params": params_metadata}
 
         params = ckptr.restore(
             params_path,

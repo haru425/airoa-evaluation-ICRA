@@ -4,12 +4,14 @@ import os
 import pathlib
 from typing import Any
 
+import flax.traverse_util
 import jax
 import jax.numpy as jnp
 
 import openpi.models.model as _model
 import openpi.models.pi0_config as _pi0_config
 import openpi.policies.policy as _policy
+import openpi.shared.array_typing as at
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
@@ -50,6 +52,167 @@ def _set_lora_variant(variant: str, *, enabled: bool) -> str:
     if enabled:
         return variant if variant.endswith("_lora") else f"{variant}_lora"
     return variant.removesuffix("_lora")
+
+
+_IQL_ACTOR_EXPERT_INDEX = 4
+_POLICY_ACTION_EXPERT_INDEX = 1
+_IQL_SHARED_LORA_ADAPTER_COUNTS = frozenset((4, 7, 8))
+_IQL_POLICY_TOP_LEVEL_PREFIXES = (
+    ("action_in_proj",),
+    ("action_out_proj",),
+    ("time_mlp_in",),
+    ("time_mlp_out",),
+    ("state_proj",),
+    ("action_time_mlp_in",),
+    ("action_time_mlp_out",),
+)
+_GEMMA_EXPERT_MODULE_BASES = (
+    "pre_attention_norm",
+    "pre_ffw_norm",
+    "qkv_einsum",
+    "q_einsum",
+    "kv_einsum",
+    "attn_vec_einsum",
+    "mlp",
+    "final_norm",
+)
+
+
+def _has_path_prefix(key_path: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
+    return key_path[: len(prefix)] == prefix
+
+
+def _gemma_expert_index(path_part: str) -> int | None:
+    for base in _GEMMA_EXPERT_MODULE_BASES:
+        if path_part == base:
+            return 0
+        prefix = f"{base}_"
+        if path_part.startswith(prefix):
+            suffix = path_part[len(prefix) :]
+            if suffix.isdigit():
+                return int(suffix)
+    return None
+
+
+def _rename_gemma_expert_index(path_part: str, new_index: int) -> str:
+    for base in _GEMMA_EXPERT_MODULE_BASES:
+        if path_part == base:
+            return base if new_index == 0 else f"{base}_{new_index}"
+        prefix = f"{base}_"
+        if path_part.startswith(prefix) and path_part[len(prefix) :].isdigit():
+            return base if new_index == 0 else f"{base}_{new_index}"
+    return path_part
+
+
+def _is_lora_param_path(key_path: tuple[str, ...]) -> bool:
+    return any("lora" in path_part for path_part in key_path)
+
+
+def _is_iql_policy_param_key(key_path: tuple[str, ...]) -> bool:
+    if any(_has_path_prefix(key_path, prefix) for prefix in _IQL_POLICY_TOP_LEVEL_PREFIXES):
+        return True
+
+    if _has_path_prefix(key_path, ("PaliGemma", "img_actor")):
+        return True
+    if _has_path_prefix(key_path, ("PaliGemma", "img")):
+        # Legacy IQL checkpoints used one shared image encoder at the same path as policy-only checkpoints.
+        return True
+
+    if not _has_path_prefix(key_path, ("PaliGemma", "llm")):
+        return False
+
+    for path_part in key_path:
+        expert_index = _gemma_expert_index(path_part)
+        if expert_index is not None:
+            return expert_index in (0, _IQL_ACTOR_EXPERT_INDEX)
+
+    # Shared LLM params such as the token embedder are policy params.
+    return True
+
+
+def _slice_iql_lora_adapter(key_path: tuple[str, ...], value: Any) -> Any:
+    if not _is_lora_param_path(key_path):
+        return value
+    if not _has_path_prefix(key_path, ("PaliGemma", "llm")):
+        return value
+    shape = getattr(value, "shape", ())
+    if not shape or shape[0] not in _IQL_SHARED_LORA_ADAPTER_COUNTS:
+        return value
+    return value[0]
+
+
+def _remap_iql_policy_params(params: at.Params) -> at.Params:
+    """Convert IQL actor params to the normal policy-only pi0.5 parameter layout."""
+
+    flat_params = flax.traverse_util.flatten_dict(params)
+    remapped: dict[tuple[str, ...], Any] = {}
+    for key_path, value in flat_params.items():
+        if not _is_iql_policy_param_key(key_path):
+            continue
+
+        if _has_path_prefix(key_path, ("PaliGemma", "img_actor")):
+            new_key_path = ("PaliGemma", "img", *key_path[2:])
+        elif _has_path_prefix(key_path, ("PaliGemma", "llm")):
+            new_key_path = tuple(
+                _rename_gemma_expert_index(path_part, _POLICY_ACTION_EXPERT_INDEX)
+                if _gemma_expert_index(path_part) == _IQL_ACTOR_EXPERT_INDEX
+                else path_part
+                for path_part in key_path
+            )
+        else:
+            new_key_path = key_path
+
+        # Prefer the explicit actor image encoder when both legacy shared and split image keys exist.
+        if new_key_path in remapped and not _has_path_prefix(key_path, ("PaliGemma", "img_actor")):
+            continue
+        remapped[new_key_path] = _slice_iql_lora_adapter(key_path, value)
+
+    return flax.traverse_util.unflatten_dict(remapped)
+
+
+def _make_pi0_policy_only_config(train_config: _config.TrainConfig, params: at.Params) -> _config.TrainConfig:
+    model_config = train_config.model
+    if not isinstance(model_config, _pi0_config.Pi0Config) or not model_config.use_iql:
+        return train_config
+
+    checkpoint_uses_lora = _checkpoint_uses_lora(params)
+    adjusted_fields: dict[str, Any] = {
+        "use_iql": False,
+        "split_discriminator_head": False,
+        "instruction_discriminator_only_pretrain": False,
+        "iql_actor_loss_type": "awr",
+        "use_binary_reward": False,
+        "action_relabeling_ratio_for_disc_l": 0.0,
+        "joint_relabeling_ratio_for_disc_l": 0.0,
+        "flipped_image_action_ratio_for_disc_l": 0.0,
+        "flipped_image_only_ratio_for_disc_l": 0.0,
+        "flipped_action_only_ratio_for_disc_l": 0.0,
+        "use_obs_action_similarity_as_weight": False,
+        "entropy_regularization_coef": 0.0,
+        "actor_instruction_discriminator_topk_ratio": 1.0,
+        "treat_instruction_only_as_unlabeled_for_disc_l": False,
+        "treat_action_only_as_unlabeled_for_disc_l": False,
+        "discriminator_entropy_exclude_unlabeled": False,
+        "discriminator_front_camera_zero_probability": 0.0,
+        "discriminator_wrist_camera_zero_probability": 0.0,
+        "discriminator_proprio_zero_probability": 0.0,
+        "rel_disc_reward_weight": 0.5,
+    }
+
+    model_uses_lora = "lora" in model_config.paligemma_variant or "lora" in model_config.action_expert_variant
+    if checkpoint_uses_lora != model_uses_lora:
+        adjusted_fields.update(
+            paligemma_variant=_set_lora_variant(model_config.paligemma_variant, enabled=checkpoint_uses_lora),
+            action_expert_variant=_set_lora_variant(
+                model_config.action_expert_variant,
+                enabled=checkpoint_uses_lora,
+            ),
+        )
+
+    logging.info(
+        "Loading IQL checkpoint as policy-only model; critic and discriminator params will not be restored."
+    )
+    return dataclasses.replace(train_config, model=dataclasses.replace(model_config, **adjusted_fields))
 
 
 def _maybe_adjust_pi0_model_for_checkpoint(train_config: _config.TrainConfig, params: Any) -> _config.TrainConfig:
@@ -164,6 +327,7 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
+    load_policy_only: bool = False,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -179,6 +343,9 @@ def create_trained_policy(
             from the checkpoint directory.
         pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda", "cuda:0").
                       If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
+        load_policy_only: If True and the selected JAX config is an IQL pi0.5 config, restore only the actor
+            parameters and instantiate a policy-only model. This avoids loading critic and discriminator branches
+            during action-serving deployments.
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
@@ -196,8 +363,22 @@ def create_trained_policy(
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
-        params = _model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16)
-        train_config = _maybe_adjust_pi0_model_for_checkpoint(train_config, params)
+        use_policy_only_restore = (
+            load_policy_only
+            and isinstance(train_config.model, _pi0_config.Pi0Config)
+            and train_config.model.use_iql
+        )
+        if use_policy_only_restore:
+            params = _model.restore_params(
+                checkpoint_dir / "params",
+                dtype=jnp.bfloat16,
+                key_filter=_is_iql_policy_param_key,
+            )
+            train_config = _make_pi0_policy_only_config(train_config, params)
+            params = _remap_iql_policy_params(params)
+        else:
+            params = _model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16)
+            train_config = _maybe_adjust_pi0_model_for_checkpoint(train_config, params)
         model = train_config.model.load(params)
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if data_config.asset_id is not None:

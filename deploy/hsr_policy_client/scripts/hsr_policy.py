@@ -517,13 +517,13 @@ class HSREnv:
 
     def head_image_callback(self, msg: CompressedImage):
         np_arr = np.frombuffer(msg.data, np.uint8)
-        image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)[:, :, :]  # bgr -> rgb
-        self.head_rgb = np.array(image)
+        bgr_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        self.head_rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
 
     def hand_image_callback(self, msg: CompressedImage):
         np_arr = np.frombuffer(msg.data, np.uint8)
-        image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)[:, :, :]  # bgr -> rgb
-        self.hand_rgb = np.array(image)
+        bgr_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        self.hand_rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
 
     def joint_state_callback(self, msg: JointState):
         joints = [msg.position[msg.name.index(name)] for name in self.joint_state_names]

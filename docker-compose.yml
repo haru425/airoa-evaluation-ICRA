@@ -10,6 +10,8 @@ services:
       POLICY_SERVER_HOST: "0.0.0.0"
       POLICY_SERVER_PORT: ${POLICY_SERVER_PORT:-8000}
       POLICY_CHECKPOINT_DIR: /policy_checkpoint
+      POLICY_MODULE: ${POLICY_MODULE:-my_policy.adapter:MyPolicyAdapter}
+      POLICY_PYTORCH_DEVICE: ${POLICY_PYTORCH_DEVICE:-cuda}
       POLICY_DATA_HOME: /policy_assets
       HF_HOME: /policy_hf_cache
     volumes:

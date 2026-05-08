@@ -14,9 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml uv.lock LICENSE README.md ./
 COPY packages/policy-client ./packages/policy-client
-COPY src ./src
-COPY server ./server
-COPY runtime_core ./runtime_core
 
 # Create virtual environment and install locked deps including local workspace packages.
 RUN uv venv --python 3.11 /workspace/.venv
@@ -27,9 +24,13 @@ RUN uv pip install --python /workspace/.venv/bin/python pytest
 # from the official PyTorch index. Required for Blackwell (RTX 5070 Ti);
 # without it, any CUDA op raises "no kernel image is available for execution
 # on the device". --no-deps keeps the rest of uv sync's resolution intact.
-RUN /workspace/.venv/bin/pip install --force-reinstall --no-deps \
-        torch torchvision \
+RUN uv pip install --python /workspace/.venv/bin/python --force-reinstall --no-deps \
+        torch==2.7.1 torchvision==0.22.1 \
         --index-url https://download.pytorch.org/whl/cu128
+
+COPY src ./src
+COPY server ./server
+COPY runtime_core ./runtime_core
 
 ENV PATH="/workspace/.venv/bin:${PATH}"
 ENV PYTHONPATH="/workspace:/workspace/src:/workspace/packages/policy-client/src"

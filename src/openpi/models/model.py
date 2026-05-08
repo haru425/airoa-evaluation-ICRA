@@ -450,12 +450,17 @@ def restore_params(
         params_metadata = metadata["params"]
         if key_filter is not None:
             flat_metadata = traverse_util.flatten_dict(params_metadata)
-            filtered_metadata = {
-                key_path: value
-                for key_path, value in flat_metadata.items()
-                if key_filter(key_path[:-1] if key_path and key_path[-1] == "value" else key_path)
-            }
-            if not filtered_metadata:
+            num_matches = 0
+            filtered_metadata = {}
+            for key_path, value in flat_metadata.items():
+                normalized_key_path = key_path[:-1] if key_path and key_path[-1] == "value" else key_path
+                if key_filter(normalized_key_path):
+                    filtered_metadata[key_path] = value
+                    num_matches += 1
+                else:
+                    # Orbax partial restore requires the original tree structure to be preserved.
+                    filtered_metadata[key_path] = ocp.PLACEHOLDER
+            if num_matches == 0:
                 raise ValueError(f"No checkpoint params matched key_filter for {params_path}.")
             params_metadata = traverse_util.unflatten_dict(filtered_metadata)
         item = {"params": params_metadata}
@@ -472,7 +477,9 @@ def restore_params(
 
     # If the params were saved with `save_state` during openpi training, every key path will end with "value", which is
     # added by `nnx.State`. We remove the "value" suffix here and always return what NNX calls a "pure dict".
-    flat_params = traverse_util.flatten_dict(params)
+    flat_params = {
+        key_path: value for key_path, value in traverse_util.flatten_dict(params).items() if value is not ocp.PLACEHOLDER
+    }
     if all(kp[-1] == "value" for kp in flat_params):
         flat_params = {kp[:-1]: v for kp, v in flat_params.items()}
     return traverse_util.unflatten_dict(flat_params)

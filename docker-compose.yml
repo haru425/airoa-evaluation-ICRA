@@ -12,6 +12,8 @@ services:
       POLICY_CHECKPOINT_DIR: /policy_checkpoint
       POLICY_DATA_HOME: /policy_assets
       HF_HOME: /policy_hf_cache
+      POLICY_MODULE: ${POLICY_MODULE:-}
+      POLICY_PYTORCH_DEVICE: ${POLICY_PYTORCH_DEVICE:-}
     volumes:
       - ${POLICY_CHECKPOINT_PATH:-./.docker_cache/policy_checkpoint}:/policy_checkpoint:ro
       - ${POLICY_CACHE_DIR:-./.docker_cache/policy_cache}:/policy_assets

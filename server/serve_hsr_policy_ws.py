@@ -78,10 +78,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--policy-module",
-        default=os.environ.get("POLICY_MODULE"),
+        default=os.environ.get("POLICY_MODULE", "my_policy.adapter:MyPolicyAdapter"),
         help=(
             "Import path of your policy class in 'module:Class' form, e.g. "
-            "'my_policy.adapter:MyPolicyAdapter'. Defaults to the placeholder ZeroPolicy."
+            "'my_policy.adapter:MyPolicyAdapter'. Defaults to the HSR689 S2 policy adapter."
         ),
     )
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
